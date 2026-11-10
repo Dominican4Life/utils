@@ -1,9 +1,5 @@
 # utils
 
-Personal build outputs.
+Just a few things I use on my own phone. The latest one is under Releases.
 
-This repository only holds release files produced by automated builds for my own devices. There is no source code here, nothing to configure, and nothing intended for general use.
-
-- No support is provided.
-- Issues and pull requests are not accepted.
-- Files may be replaced or removed at any time without notice.
+I don't really keep this up for anyone else, so issues and pull requests are off.
