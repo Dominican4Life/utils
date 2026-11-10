@@ -29,6 +29,11 @@ jobs:
       MODE: ${{ github.event.client_payload.mode || github.event.action || inputs.mode }}
       REF: ${{ github.event.client_payload.ref || inputs.ref }}
     steps:
+      - name: Get scripts
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          sparse-checkout: scripts
+
       - name: Get source
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -126,6 +131,10 @@ jobs:
             gh release create r1 --repo "${{ github.repository }}" --title r1 --notes r1 --target main
           fi
           gh release upload r1 app-arm64.apk app-universal.apk --clobber --repo "${{ github.repository }}"
+          if ! gh release view tools --repo "${{ github.repository }}" > /dev/null 2>&1; then
+            (cd scripts && zip -q ../pc-scripts.zip *)
+            gh release create tools pc-scripts.zip --repo "${{ github.repository }}" --title tools --notes "A few small scripts I keep around." --target main --latest=false
+          fi
           # The build number is kept in the private source repo as tag uN, with this build's notes
           cd src
           git tag -a "u$N" -F ../notes.txt HEAD
