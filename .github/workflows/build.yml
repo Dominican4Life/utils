@@ -83,7 +83,11 @@ jobs:
           # What's new, built into the app: this build's notes, then the last builds' notes (newest first)
           # (the newest commit that changed more than .md files: a notes commit on top doesn't become the notes)
           code=$(git log -1 --format=%H HEAD -- . ':(exclude)*.md')
-          notes=$(git log -1 --format=%B "${code:-HEAD}" | grep -v -i -E '^(co-authored-by|claude-session|signed-off-by):' | sed -e :a -e '/^\n*$/{$d;N;ba' -e '}')
+          # (a "Release:" commit since the last build holds the full list for this build: it wins)
+          prev=$(git tag -l 'u*' --sort=-v:refname | head -1)
+          rel=$(git log -1 --format=%H --grep '^Release:' ${prev:+$prev..}HEAD)
+          [ -n "$rel" ] && code=$rel
+          notes=$(git log -1 --format=%B "${code:-HEAD}" | sed '1s/^Release: *//' | grep -v -i -E '^(co-authored-by|claude-session|signed-off-by):' | sed -e :a -e '/^\n*$/{$d;N;ba' -e '}')
           [ -n "$(printf '%s' "$notes" | tr -d '[:space:]')" ] || notes="Build $n"
           printf '%s\n' "$notes" > ../notes.txt
           {
