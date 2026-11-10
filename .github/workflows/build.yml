@@ -1,0 +1,151 @@
+name: build
+
+# Builds from a private source and publishes to the single release "r1" in this repo, replacing its files.
+# Logs stay short on purpose: build output goes to a file, and on failure the details are saved privately.
+on:
+  repository_dispatch:
+    types: [release, check]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: commit or branch
+        required: true
+      mode:
+        description: release or check
+        required: true
+        default: release
+
+concurrency:
+  group: build
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    env:
+      MODE: ${{ github.event.client_payload.mode || github.event.action || inputs.mode }}
+      REF: ${{ github.event.client_payload.ref || inputs.ref }}
+    steps:
+      - name: Get source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: ${{ secrets.BOT_REPO }}
+          token: ${{ secrets.BOT_TOKEN }}
+          ref: ${{ github.event.client_payload.ref || inputs.ref }}
+          fetch-depth: 0
+          path: src
+
+      - name: Set up JDK
+        uses: actions/setup-java@1bcf9fb12cf4aa7d266a90ae39939e61372fe520 # v5.4.0
+        with:
+          java-version: '21'
+          distribution: temurin
+
+      - name: Set up gradle
+        uses: gradle/actions/setup-gradle@3f131e8634966bd73d06cc69884922b02e6faf92 # v6
+        with:
+          add-job-summary: never
+
+      - name: Prepare
+        shell: bash
+        working-directory: src
+        run: |
+          mkdir -p ~/.android
+          cp .github/custom-debug.keystore ~/.android/debug.keystore
+          git config user.name "build"
+          git config user.email "build@users.noreply.github.com"
+          # Build number N: one after the newest uN tag. The app shows rN; its version code is 162 + N.
+          last=$(git tag -l 'u*' | sed -n 's/^u\([0-9]\+\)$/\1/p' | sort -n | tail -1)
+          n=$(( ${last:-0} + 1 ))
+          echo "N=$n" >> "$GITHUB_ENV"
+          echo "KMK_RELEASE=$n" >> "$GITHUB_ENV"
+          echo "KMK_VERSION_CODE=$(( 162 + n ))" >> "$GITHUB_ENV"
+          # What's new, built into the app: this build's notes, then the last builds' notes (newest first)
+          notes=$(git log -1 --format=%B HEAD | grep -v -i -E '^(co-authored-by|claude-session|signed-off-by):' | sed -e :a -e '/^\n*$/{$d;N;ba' -e '}')
+          [ -n "$(printf '%s' "$notes" | tr -d '[:space:]')" ] || notes="Build $n"
+          printf '%s\n' "$notes" > ../notes.txt
+          {
+            printf '## r%s\n\n%s\n' "$n" "$notes"
+            for t in $(git tag -l 'u*' --sort=-v:refname | head -9); do
+              printf '\n---\n\n## r%s\n\n%s\n' "${t#u}" "$(git tag -l --format='%(contents)' "$t")"
+            done
+          } > app/src/main/assets/whatsnew.md
+          echo "Build $n ($MODE)"
+
+      - name: Build
+        shell: bash
+        working-directory: src
+        run: |
+          set -o pipefail
+          if [ "$MODE" = "check" ]; then
+            tasks=":app:compilePreviewKotlin :app:testPreviewUnitTest --tests eu.kanade.tachiyomi.kmk.*"
+          else
+            tasks="assemblePreview :app:testPreviewUnitTest --tests eu.kanade.tachiyomi.kmk.*"
+          fi
+          extra=""
+          for attempt in 1 2 3 4; do
+            if ./gradlew $tasks --stacktrace $extra > ../build.log 2>&1; then echo "Build passed"; exit 0; fi
+            extra="--refresh-dependencies"
+            if ! grep -q "Could not resolve\|Could not find\|Could not GET\|Read timed out" ../build.log; then echo "Build failed"; exit 1; fi
+            echo "Download failed, retrying ($attempt)"
+            sleep 45
+          done
+          echo "Build failed"
+          exit 1
+
+      - name: Check signing key
+        if: env.MODE != 'check'
+        shell: bash
+        run: |
+          apksigner=$(ls "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -1)
+          expected="2c43cb4f1bca57c8a91aea87819655e45d54047020856db3d2d7702264e34c4f"
+          for f in src/app/build/outputs/apk/preview/*.apk; do
+            digest=$("$apksigner" verify --print-certs "$f" | sed -n 's/.*certificate SHA-256 digest: //p' | head -1)
+            if [ "$digest" != "$expected" ]; then echo "Wrong signing key" > build-error.txt; echo "Wrong signing key"; exit 1; fi
+          done
+          echo "Signing key OK"
+
+      - name: Publish
+        if: env.MODE != 'check'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for f in src/app/build/outputs/apk/preview/*.apk; do
+            abi=$(basename "$f" .apk | sed 's/^app-//; s/-preview.*//')
+            case "$abi" in
+              arm64-v8a) cp "$f" app-arm64.apk ;;
+              universal) cp "$f" app-universal.apk ;;
+            esac
+          done
+          ls app-arm64.apk app-universal.apk > /dev/null
+          if ! gh release view r1 --repo "${{ github.repository }}" > /dev/null 2>&1; then
+            gh release create r1 --repo "${{ github.repository }}" --title r1 --notes r1 --target main
+          fi
+          gh release upload r1 app-arm64.apk app-universal.apk --clobber --repo "${{ github.repository }}"
+          # The build number is kept in the private source repo as tag uN, with this build's notes
+          cd src
+          git tag -a "u$N" -F ../notes.txt HEAD
+          git push -q origin "u$N"
+          echo "Published"
+
+      # Details of a failure are saved to the private source repo (branch ci-logs), not printed here
+      - name: Save failure details privately
+        if: failure()
+        shell: bash
+        working-directory: src
+        run: |
+          { grep -E "^e: |^ERROR|FAILED$|Test.*FAILED|expected:|\.sqm?[:(]|sqldelight" ../build.log; grep -A25 "What went wrong" ../build.log; cat ../build-error.txt 2>/dev/null; } | head -200 > ../errors.txt || true
+          if [ ! -s ../errors.txt ]; then tail -120 ../build.log > ../errors.txt 2>/dev/null || echo "no log" > ../errors.txt; fi
+          sha=$(git rev-parse HEAD)
+          git fetch -q origin ci-logs 2>/dev/null && git checkout -q -B ci-logs FETCH_HEAD || git checkout -q --orphan ci-logs
+          git rm -rq --cached . > /dev/null 2>&1 || true
+          mkdir -p logs
+          cp ../errors.txt "logs/errors.txt"
+          { echo "mode: $MODE"; echo "build: $N"; echo "commit: $sha"; echo "run: ${{ github.run_id }}"; } > logs/last.txt
+          git add -f logs/errors.txt logs/last.txt
+          git commit -qm "Build $N failed ($MODE) at $sha" && git push -q origin ci-logs || true
+          echo "Details saved privately"
