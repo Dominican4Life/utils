@@ -81,7 +81,9 @@ jobs:
           echo "KMK_RELEASE=$n" >> "$GITHUB_ENV"
           echo "KMK_VERSION_CODE=$(( 162 + n ))" >> "$GITHUB_ENV"
           # What's new, built into the app: this build's notes, then the last builds' notes (newest first)
-          notes=$(git log -1 --format=%B HEAD | grep -v -i -E '^(co-authored-by|claude-session|signed-off-by):' | sed -e :a -e '/^\n*$/{$d;N;ba' -e '}')
+          # (the newest commit that changed more than .md files: a notes commit on top doesn't become the notes)
+          code=$(git log -1 --format=%H HEAD -- . ':(exclude)*.md')
+          notes=$(git log -1 --format=%B "${code:-HEAD}" | grep -v -i -E '^(co-authored-by|claude-session|signed-off-by):' | sed -e :a -e '/^\n*$/{$d;N;ba' -e '}')
           [ -n "$(printf '%s' "$notes" | tr -d '[:space:]')" ] || notes="Build $n"
           printf '%s\n' "$notes" > ../notes.txt
           {
