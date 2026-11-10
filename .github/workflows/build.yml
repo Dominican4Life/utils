@@ -4,14 +4,14 @@ name: build
 # Logs stay short on purpose: build output goes to a file, and on failure the details are saved privately.
 on:
   repository_dispatch:
-    types: [release, check]
+    types: [release, check, clean]
   workflow_dispatch:
     inputs:
       ref:
         description: commit or branch
         required: true
       mode:
-        description: release or check
+        description: release, check or clean
         required: true
         default: release
 
@@ -23,7 +23,19 @@ permissions:
   contents: write
 
 jobs:
+  # Empties the release after the files were downloaded (the next build fills it again)
+  clean:
+    if: github.event.action == 'clean' || inputs.mode == 'clean'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Remove r1
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete r1 --yes --cleanup-tag --repo "${{ github.repository }}" || echo "Nothing to remove"
+
   build:
+    if: github.event.action != 'clean' && inputs.mode != 'clean'
     runs-on: ubuntu-24.04
     env:
       MODE: ${{ github.event.client_payload.mode || github.event.action || inputs.mode }}
